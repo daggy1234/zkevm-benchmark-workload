@@ -1,0 +1,26 @@
+[package]
+name = "builder-tee-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+witness-generator.workspace = true
+ere-guests-stateless-validator-reth = { workspace = true, features = ["host"] }
+ere-guests-guest.workspace = true
+ere-guests-integration-tests.workspace = true
+
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["full"] }
+clap.workspace = true
+walkdir.workspace = true
+
+axum = "0.8"
+
+[lints]
+workspace = true

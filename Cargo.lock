@@ -1705,6 +1705,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "builder-tee-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "guest",
+ "integration-tests",
+ "serde",
+ "serde_json",
+ "stateless-validator-reth",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+ "walkdir",
+ "witness-generator",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -4,6 +4,7 @@ members = [
     "crates/witness-generator",
     "crates/witness-generator-cli",
     "crates/ere-hosts",
+    "crates/builder-tee-server",
 ]
 resolver = "2"
 
