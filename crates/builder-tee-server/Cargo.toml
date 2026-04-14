@@ -7,9 +7,12 @@ license.workspace = true
 
 [dependencies]
 witness-generator.workspace = true
-ere-guests-stateless-validator-reth = { workspace = true, features = ["host"] }
-ere-guests-guest.workspace = true
-ere-guests-integration-tests.workspace = true
+stateless.workspace = true
+reth-chainspec.workspace = true
+reth-evm-ethereum.workspace = true
+reth-ethereum-primitives.workspace = true
+alloy-consensus = "1.8"
+k256 = { version = "0.13", features = ["ecdsa"] }
 
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

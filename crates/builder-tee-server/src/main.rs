@@ -14,7 +14,9 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use alloy_consensus as _;
+use reth_ethereum_primitives as _;
 use axum::{
     Router,
     extract::{Path, State},
@@ -22,11 +24,8 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
-use ere_guests_guest::Guest;
-use ere_guests_integration_tests::NoopPlatform;
-use ere_guests_stateless_validator_reth::guest::{
-    StatelessValidatorRethGuest, StatelessValidatorRethInput,
-};
+use reth_chainspec::MAINNET;
+use reth_evm_ethereum::EthEvmConfig;
 use serde::Serialize;
 use std::{net::SocketAddr, sync::Arc, time::Instant};
 use tracing::{info, warn};
@@ -71,17 +70,16 @@ struct LoadedFixture {
     category: &'static str,
 }
 
-/// Classify a fixture as lightweight / moderate / heavy / worst-case based on
-/// witness size, state node count, and transaction count.
-fn classify_fixture(raw_size: usize, n_state: usize, n_txs: usize) -> &'static str {
-    if n_state <= 20 && n_txs <= 2 && raw_size < 100_000 {
-        "lightweight"
-    } else if n_state <= 200 && n_txs <= 50 {
+/// Classify a fixture by complexity using real mainnet percentile boundaries.
+fn classify_fixture(_raw_size: usize, n_state: usize, _n_txs: usize) -> &'static str {
+    if n_state < 8_000 {
+        "light"
+    } else if n_state < 12_000 {
         "moderate"
-    } else if n_state <= 2000 {
+    } else if n_state < 18_000 {
         "heavy"
     } else {
-        "worst_case"
+        "extreme"
     }
 }
 
@@ -107,7 +105,7 @@ struct ValidationResponse {
     /// Time to deserialise the fixture JSON (ms). Only for `/witness`.
     #[serde(skip_serializing_if = "Option::is_none")]
     deser_ms: Option<f64>,
-    /// Time to create `StatelessValidatorRethInput` from `StatelessInput` (ms).
+    /// Time for input preparation: ECDSA signature recovery (ms).
     #[serde(skip_serializing_if = "Option::is_none")]
     input_prep_ms: Option<f64>,
     /// Time for full Reth stateless validation: witness verify + EVM exec +
@@ -226,16 +224,53 @@ fn load_fixtures(dir: &std::path::Path, max_bytes: usize) -> Vec<LoadedFixture> 
 
 /// Run real Reth stateless validation. Returns (input_prep_ms, validation_ms).
 fn run_validation(fixture: &StatelessValidationFixture) -> Result<(f64, f64)> {
-    // Stage: create guest input (wraps StatelessInput for Reth guest)
+    let si = &fixture.stateless_input;
+
+    // Stage 1: prepare inputs — recover sender public keys from ECDSA sigs
     let t_prep = Instant::now();
-    let input = StatelessValidatorRethInput::new(&fixture.stateless_input, fixture.success)
-        .context("Failed to create Reth stateless validator input")?;
+    let block = si.block.clone();
+    let witness = si.witness.clone();
+    let chain_spec = MAINNET.clone();
+    let evm_config = EthEvmConfig::new(chain_spec.clone());
+
+    let public_keys: Vec<stateless::UncompressedPublicKey> = block
+        .body
+        .transactions
+        .iter()
+        .map(|tx| {
+            let sig = tx.signature();
+            let hash = tx.signature_hash();
+            let recid = k256::ecdsa::RecoveryId::new(sig.v(), false);
+            let mut sig_bytes = [0u8; 64];
+            sig_bytes[..32].copy_from_slice(&sig.r().to_be_bytes::<32>());
+            sig_bytes[32..].copy_from_slice(&sig.s().to_be_bytes::<32>());
+            let signature = k256::ecdsa::Signature::from_bytes((&sig_bytes).into())
+                .map_err(|e| anyhow::anyhow!("Invalid signature: {e}"))?;
+            let vk = k256::ecdsa::VerifyingKey::recover_from_prehash(
+                hash.as_slice(),
+                &signature,
+                recid,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to recover pubkey: {e}"))?;
+            let pk_bytes = vk.to_encoded_point(false);
+            let mut out = [0u8; 65];
+            out.copy_from_slice(pk_bytes.as_bytes());
+            Ok(stateless::UncompressedPublicKey(out))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let input_prep_ms = t_prep.elapsed().as_secs_f64() * 1000.0;
 
-    // Stage: full validation — MPT proof verify, WitnessDB build,
-    //        EVM execution, post-state root check
+    // Stage 2: full stateless validation — MPT proof verify, EVM execution,
+    //          post-state root check
     let t_val = Instant::now();
-    let _output = StatelessValidatorRethGuest::compute::<NoopPlatform>(input);
+    let _output = stateless::stateless_validation(
+        block,
+        public_keys,
+        witness,
+        chain_spec,
+        evm_config,
+    )
+    .map_err(|e| anyhow::anyhow!("Stateless validation failed: {e:?}"))?;
     let validation_ms = t_val.elapsed().as_secs_f64() * 1000.0;
 
     Ok((input_prep_ms, validation_ms))
