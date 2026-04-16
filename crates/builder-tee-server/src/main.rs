@@ -14,9 +14,8 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use anyhow::Result;
 use alloy_consensus as _;
-use reth_ethereum_primitives as _;
+use anyhow::Result;
 use axum::{
     Router,
     extract::{Path, State},
@@ -24,9 +23,12 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
+use hmac::{Hmac, Mac};
 use reth_chainspec::MAINNET;
+use reth_ethereum_primitives as _;
 use reth_evm_ethereum::EthEvmConfig;
 use serde::Serialize;
+use sha2::Sha256;
 use std::{net::SocketAddr, sync::Arc, time::Instant};
 use tracing::{info, warn};
 use walkdir::WalkDir;
@@ -83,6 +85,34 @@ fn classify_fixture(_raw_size: usize, n_state: usize, _n_txs: usize) -> &'static
     }
 }
 
+// ── Attestation ─────────────────────────────────────────────────────
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Shared HMAC key for mock BT attestation (benchmarking only).
+/// In production this would be replaced by real TEE attestation (e.g. AMD SEV-SNP report).
+const SHARED_KEY: &[u8] = b"dpaas-benchmark-key-2026";
+
+/// Compute a mock BT attestation: HMAC-SHA256(key, block_hash || "VALID").
+/// Binds the attestation to the specific bid's block_hash so it cannot be
+/// replayed for a different bid. In production, this is an SEV-SNP report
+/// over the same data.
+fn compute_attestation(block_hash: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(SHARED_KEY).expect("HMAC accepts any key length");
+    mac.update(block_hash);
+    mac.update(b"VALID");
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Optional JSON body for `/validate_and_attest/{idx}`.
+#[derive(serde::Deserialize, Default)]
+struct AttestRequest {
+    /// Hex-encoded block_hash from the bid's BidTrace.
+    /// The attestation is bound to this hash so PEs can verify it.
+    #[serde(default)]
+    block_hash: Option<String>,
+}
+
 // ── Response types ───────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -115,6 +145,12 @@ struct ValidationResponse {
     /// Total server-side wall-clock time (ms).
     #[serde(skip_serializing_if = "Option::is_none")]
     total_server_ms: Option<f64>,
+    /// Time to compute mock HMAC attestation (ms). Only for `/validate_and_attest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestation_ms: Option<f64>,
+    /// Hex-encoded HMAC-SHA256 attestation bytes. Only for `/validate_and_attest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestation_hex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -134,6 +170,8 @@ impl Default for ValidationResponse {
             input_prep_ms: None,
             validation_ms: None,
             total_server_ms: None,
+            attestation_ms: None,
+            attestation_hex: None,
             error: None,
         }
     }
@@ -166,10 +204,7 @@ fn load_fixtures(dir: &std::path::Path, max_bytes: usize) -> Vec<LoadedFixture> 
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if !path
-            .extension()
-            .is_some_and(|ext| ext == "json")
-        {
+        if !path.extension().is_some_and(|ext| ext == "json") {
             continue;
         }
         let meta = match std::fs::metadata(path) {
@@ -246,12 +281,9 @@ fn run_validation(fixture: &StatelessValidationFixture) -> Result<(f64, f64)> {
             sig_bytes[32..].copy_from_slice(&sig.s().to_be_bytes::<32>());
             let signature = k256::ecdsa::Signature::from_bytes((&sig_bytes).into())
                 .map_err(|e| anyhow::anyhow!("Invalid signature: {e}"))?;
-            let vk = k256::ecdsa::VerifyingKey::recover_from_prehash(
-                hash.as_slice(),
-                &signature,
-                recid,
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to recover pubkey: {e}"))?;
+            let vk =
+                k256::ecdsa::VerifyingKey::recover_from_prehash(hash.as_slice(), &signature, recid)
+                    .map_err(|e| anyhow::anyhow!("Failed to recover pubkey: {e}"))?;
             let pk_bytes = vk.to_encoded_point(false);
             let mut out = [0u8; 65];
             out.copy_from_slice(pk_bytes.as_bytes());
@@ -263,14 +295,9 @@ fn run_validation(fixture: &StatelessValidationFixture) -> Result<(f64, f64)> {
     // Stage 2: full stateless validation — MPT proof verify, EVM execution,
     //          post-state root check
     let t_val = Instant::now();
-    let _output = stateless::stateless_validation(
-        block,
-        public_keys,
-        witness,
-        chain_spec,
-        evm_config,
-    )
-    .map_err(|e| anyhow::anyhow!("Stateless validation failed: {e:?}"))?;
+    let _output =
+        stateless::stateless_validation(block, public_keys, witness, chain_spec, evm_config)
+            .map_err(|e| anyhow::anyhow!("Stateless validation failed: {e:?}"))?;
     let validation_ms = t_val.elapsed().as_secs_f64() * 1000.0;
 
     Ok((input_prep_ms, validation_ms))
@@ -279,9 +306,7 @@ fn run_validation(fixture: &StatelessValidationFixture) -> Result<(f64, f64)> {
 // ── Handlers ─────────────────────────────────────────────────────────
 
 /// `POST /witness` — accepts full fixture JSON, deserialises, validates.
-async fn handle_witness(
-    body: axum::body::Bytes,
-) -> (StatusCode, axum::Json<ValidationResponse>) {
+async fn handle_witness(body: axum::body::Bytes) -> (StatusCode, axum::Json<ValidationResponse>) {
     let t_start = Instant::now();
     let body_len = body.len();
 
@@ -360,7 +385,9 @@ async fn handle_validate_by_idx(
 
     // Clone the fixture for the blocking task
     let fixture = loaded.fixture.clone();
-    let result = tokio::task::spawn_blocking(move || run_validation(&fixture)).await.unwrap();
+    let result = tokio::task::spawn_blocking(move || run_validation(&fixture))
+        .await
+        .unwrap();
 
     match result {
         Ok((input_prep_ms, validation_ms)) => (
@@ -381,6 +408,92 @@ async fn handle_validate_by_idx(
                 ..Default::default()
             }),
         ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(ValidationResponse {
+                status: "rejected".into(),
+                fixture_name: Some(name),
+                fixture_idx: Some(idx),
+                error: Some(format!("{e:#}")),
+                total_server_ms: Some(t_start.elapsed().as_secs_f64() * 1000.0),
+                ..Default::default()
+            }),
+        ),
+    }
+}
+
+/// `POST /validate_and_attest/{idx}` — validates pre-loaded fixture, then produces a
+/// mock HMAC-SHA256 attestation bound to the bid's block_hash
+/// (proxy for real TEE attestation in production).
+///
+/// Accepts optional JSON body: `{"block_hash": "0xabc..."}`.
+/// If omitted, uses 32 zero bytes (for bench_all.py timing-only runs).
+async fn handle_validate_and_attest(
+    State(state): State<Arc<AppState>>,
+    Path(idx): Path<usize>,
+    body: Option<axum::Json<AttestRequest>>,
+) -> (StatusCode, axum::Json<ValidationResponse>) {
+    let block_hash_bytes = body
+        .and_then(|b| b.block_hash.as_deref().and_then(|h| hex::decode(h).ok()))
+        .unwrap_or_else(|| vec![0u8; 32]);
+    let t_start = Instant::now();
+
+    if idx >= state.fixtures.len() {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(ValidationResponse {
+                status: "error".into(),
+                error: Some(format!(
+                    "fixture index {idx} out of range (have {})",
+                    state.fixtures.len()
+                )),
+                ..Default::default()
+            }),
+        );
+    }
+
+    let loaded = &state.fixtures[idx];
+    let name = loaded.fixture.name.clone();
+    let gas = loaded.fixture.stateless_input.block.gas_used;
+    let raw_size = loaded.raw_size;
+    let n_state_nodes = loaded.n_state_nodes;
+    let n_txs = loaded.n_txs;
+    let category = loaded.category;
+
+    // Clone the fixture for the blocking task
+    let fixture = loaded.fixture.clone();
+    let result = tokio::task::spawn_blocking(move || run_validation(&fixture))
+        .await
+        .unwrap();
+
+    match result {
+        Ok((input_prep_ms, validation_ms)) => {
+            // Compute mock attestation bound to bid's block_hash and time it
+            let t_att = Instant::now();
+            let att_bytes = compute_attestation(&block_hash_bytes);
+            let attestation_ms = t_att.elapsed().as_secs_f64() * 1000.0;
+
+            (
+                StatusCode::OK,
+                axum::Json(ValidationResponse {
+                    status: "accepted".into(),
+                    fixture_name: Some(name),
+                    fixture_idx: Some(idx),
+                    witness_size_bytes: Some(raw_size),
+                    block_gas_used: Some(gas),
+                    n_state_nodes: Some(n_state_nodes),
+                    n_txs: Some(n_txs),
+                    category: Some(category.into()),
+                    deser_ms: Some(0.0),
+                    input_prep_ms: Some(input_prep_ms),
+                    validation_ms: Some(validation_ms),
+                    total_server_ms: Some(t_start.elapsed().as_secs_f64() * 1000.0),
+                    attestation_ms: Some(attestation_ms),
+                    attestation_hex: Some(hex::encode(&att_bytes)),
+                    ..Default::default()
+                }),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             axum::Json(ValidationResponse {
@@ -451,8 +564,7 @@ async fn handle_health() -> &'static str {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -464,6 +576,10 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/witness", post(handle_witness))
         .route("/validate/{idx}", post(handle_validate_by_idx))
+        .route(
+            "/validate_and_attest/{idx}",
+            post(handle_validate_and_attest),
+        )
         .route("/info", get(handle_info))
         .route("/health", get(handle_health))
         .with_state(state);

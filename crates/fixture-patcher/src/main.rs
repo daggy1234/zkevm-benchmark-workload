@@ -29,8 +29,7 @@ struct Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -98,8 +97,7 @@ fn main() -> Result<()> {
 
 fn check_fixture(fpath: &PathBuf) -> Result<(u64, bool, usize, alloy_primitives::B256)> {
     let raw = std::fs::read(fpath).context("read")?;
-    let fixture: StatelessValidationFixture =
-        serde_json::from_slice(&raw).context("parse JSON")?;
+    let fixture: StatelessValidationFixture = serde_json::from_slice(&raw).context("parse JSON")?;
 
     let ancestor_bytes = fixture
         .stateless_input
