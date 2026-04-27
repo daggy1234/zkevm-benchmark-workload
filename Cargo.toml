@@ -12,7 +12,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.93"
 license = "MIT OR Apache-2.0"
 
 [workspace.lints]
@@ -106,29 +106,26 @@ zkevm-metrics = { path = "crates/metrics" }
 benchmark-runner = { path = "crates/benchmark-runner" }
 
 # ere
-ere-zkvm-interface = { git = "https://github.com/eth-act/ere", rev = "3914a12f18b5f27807114048ae4829f3e999806b", package = "ere-zkvm-interface" }
-ere-dockerized = { git = "https://github.com/eth-act/ere", rev = "3914a12f18b5f27807114048ae4829f3e999806b", package = "ere-dockerized" }
-ere-io = { git = "https://github.com/eth-act/ere", rev = "3914a12f18b5f27807114048ae4829f3e999806b", package = "ere-io" }
+ere-dockerized = { git = "https://github.com/eth-act/ere", tag = "v0.8.0" }
 
 # ere-guests
-ere-guests-block-encoding-length = { git = "https://github.com/eth-act/ere-guests", tag = "v0.8.0", package = "block-encoding-length" }
-ere-guests-stateless-validator-reth = { git = "https://github.com/eth-act/ere-guests", tag = "v0.8.0", package = "stateless-validator-reth" }
-ere-guests-stateless-validator-ethrex = { git = "https://github.com/eth-act/ere-guests", tag = "v0.8.0", package = "stateless-validator-ethrex" }
-ere-guests-guest = { git = "https://github.com/eth-act/ere-guests", tag = "v0.8.0", package = "guest" }
-ere-guests-integration-tests = { git = "https://github.com/eth-act/ere-guests", tag = "v0.8.0", package = "integration-tests" }
-ere-guests-downloader = { git = "https://github.com/eth-act/ere-guests", tag = "v0.8.0", package = "downloader" }
+ere-guests-stateless-validator-reth = { git = "https://github.com/eth-act/ere-guests", rev = "a58aa0d7f2c0a813d666eabc9fd94036a21d87b5", package = "stateless-validator-reth" }
+ere-guests-stateless-validator-ethrex = { git = "https://github.com/eth-act/ere-guests", rev = "a58aa0d7f2c0a813d666eabc9fd94036a21d87b5", package = "stateless-validator-ethrex" }
+ere-guests-guest = { git = "https://github.com/eth-act/ere-guests", rev = "a58aa0d7f2c0a813d666eabc9fd94036a21d87b5", package = "guest" }
+ere-guests-integration-tests = { git = "https://github.com/eth-act/ere-guests", rev = "a58aa0d7f2c0a813d666eabc9fd94036a21d87b5", package = "integration-tests" }
+ere-guests-downloader = { git = "https://github.com/eth-act/ere-guests", rev = "a58aa0d7f2c0a813d666eabc9fd94036a21d87b5", package = "downloader" }
 
-reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "adc960162f", default-features = false }
-reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", rev = "adc960162f" }
-reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "adc960162f" }
-reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "adc960162f" }
-ef-tests = { git = "https://github.com/paradigmxyz/stateless", rev = "8f8c9dc" }
-stateless = { git = "https://github.com/paradigmxyz/stateless", rev = "8f8c9dc", default-features = false }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0" }
+reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0" }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0" }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0" }
+ef-tests = { git = "https://github.com/paradigmxyz/stateless", rev = "e5480e71a8031641ff471cad9dc482a7a14b32d5" }
+stateless = { git = "https://github.com/paradigmxyz/stateless", rev = "e5480e71a8031641ff471cad9dc482a7a14b32d5", default-features = false }
 
 # alloy
-alloy-eips = { version = "1.8" }
-alloy-rpc-types-eth = "1.8"
-alloy-genesis = { version = "1.8", default-features = false }
+alloy-eips = { version = "2.0" }
+alloy-rpc-types-eth = "2.0"
+alloy-genesis = { version = "2.0", default-features = false }
 
 # misc
 clap = { version = "4.0", features = ["derive"] }
@@ -158,4 +155,3 @@ reqwest = { version = "0.12", default-features = false, features = [
 flate2 = "1.1"
 tar = "0.4"
 toml = "0.8"
-

@@ -66,8 +66,10 @@ pub enum WGError {
     NoTargetBlock(String),
 
     /// Test case execution error
-    #[error("test case execution error: {source}")]
+    #[error("test case execution error for {name}: {source}")]
     TestCaseExecutionError {
+        /// Name of the test case
+        name: String,
         /// Underlying error
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -102,6 +104,45 @@ pub enum WGError {
     /// Unsupported chain
     #[error("unsupported chain ID: {0}")]
     UnsupportedChain(u64),
+
+    /// Genesis path does not exist
+    #[error("genesis path '{0}' does not exist")]
+    GenesisPathNotFound(String),
+
+    /// Genesis path is not a file
+    #[error("genesis path '{0}' is not a file")]
+    GenesisPathNotFile(String),
+
+    /// Failed to read a genesis file
+    #[error("failed to read genesis file at {path}: {source}")]
+    GenesisFileReadError {
+        /// Path to the genesis file
+        path: String,
+        /// Underlying I/O error
+        source: std::io::Error,
+    },
+
+    /// Failed to deserialize a genesis file
+    #[error("failed to deserialize genesis file at {path}: {source}")]
+    GenesisDeserializationError {
+        /// Path to the genesis file
+        path: String,
+        /// Underlying deserialization error
+        source: serde_json::Error,
+    },
+
+    /// RPC chain ID does not match the provided genesis file
+    #[error(
+        "genesis chain ID mismatch for '{path}': genesis={genesis_chain_id}, rpc={rpc_chain_id}"
+    )]
+    GenesisChainIdMismatch {
+        /// Path to the genesis file
+        path: String,
+        /// Chain ID from the genesis file
+        genesis_chain_id: u64,
+        /// Chain ID reported by the RPC endpoint
+        rpc_chain_id: u64,
+    },
 
     /// Live polling not supported in generate method
     #[error("live polling is not supported in generate method. Use generate_to_path instead.")]

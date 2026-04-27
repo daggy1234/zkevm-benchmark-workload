@@ -1,15 +1,16 @@
 //! Runner for benchmark tests
 
 use anyhow::{anyhow, Context, Result};
-use ere_dockerized::{zkVMKind, DockerizedzkVM, DockerizedzkVMConfig, SerializedProgram};
+use ere_dockerized::{
+    zkVMKind, DockerizedzkVM, DockerizedzkVMConfig, Elf, EncodedProof, ProverResource,
+};
 use ere_guests_downloader::Downloader;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::{any::Any, panic};
+use std::{any::Any, env, panic};
 use tracing::{info, warn};
 
-use ere_zkvm_interface::{zkVM, ProofKind, ProverResource};
 use zkevm_metrics::{BenchmarkRun, CrashInfo, ExecutionMetrics, HardwareInfo, ProvingMetrics};
 
 use crate::guest_programs::GuestFixture;
@@ -17,22 +18,29 @@ use crate::zisk_profiling::{run_profiling, ProfileOutcome};
 
 pub use crate::zisk_profiling::ProfileConfig;
 
-/// Default version tag for guest programs
-const DEFAULT_GUEST_VERSION: &str = "v0.7.0";
+/// How to resolve downloaded guest binaries, derived from the resolved
+/// ere-guests dependency in Cargo.lock at build time.
+const ERE_GUESTS_DOWNLOAD_KIND: &str = env!("ERE_GUESTS_DOWNLOAD_KIND");
+/// Tag or commit SHA matching [`ERE_GUESTS_DOWNLOAD_KIND`].
+const ERE_GUESTS_DOWNLOAD_VALUE: &str = env!("ERE_GUESTS_DOWNLOAD_VALUE");
 
 /// A zkVM instance bundled with ELF bytes (used for profiling).
 pub struct ZkVMInstance {
     /// The dockerized zkVM instance
     pub zkvm: DockerizedzkVM,
-    /// Raw ELF bytes of the guest program
-    pub elf: Vec<u8>,
+}
+
+impl ZkVMInstance {
+    fn elf(&self) -> &Elf {
+        self.zkvm.elf()
+    }
 }
 
 impl std::fmt::Debug for ZkVMInstance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZkVMInstance")
             .field("zkvm", &self.zkvm.name())
-            .field("elf_len", &self.elf.len())
+            .field("elf_len", &self.elf().len())
             .finish()
     }
 }
@@ -75,7 +83,7 @@ where
     HardwareInfo::detect().to_path(config.output_folder.join("hardware.json"))?;
 
     let zkvm = &instance.zkvm;
-    let elf = &instance.elf;
+    let elf = &instance.elf();
     match config.action {
         Action::Execute => inputs.par_bridge().try_for_each(|input| {
             let input = input?;
@@ -200,9 +208,7 @@ fn process_input(
             (Some(execution), None)
         }
         Action::Prove => {
-            let run = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                zkvm.prove(&input, ProofKind::Compressed)
-            }));
+            let run = panic::catch_unwind(panic::AssertUnwindSafe(|| zkvm.prove(&input)));
             let proving = match run {
                 Ok(Ok((public_values, proof, report))) => {
                     verify_public_output(zkvm.zkvm_kind(), &io, &public_values)
@@ -227,7 +233,7 @@ fn process_input(
                         .context("Failed to verify public output from proof verification")?;
 
                     ProvingMetrics::Success {
-                        proof_size: proof.as_bytes().len(),
+                        proof_size: proof.len(),
                         proving_time_ms: report.proving_time.as_millis(),
                         verification_time_ms,
                     }
@@ -294,35 +300,74 @@ pub async fn get_guest_zkvm_instances(
     let mut instances = Vec::new();
     for zkvm in zkvms {
         let guest_name = format!("{}-{}", guest_name_prefix, zkvm.as_str());
-        let (program, elf) = load_program(&guest_name, bin_path).await?;
-        let zkvm = DockerizedzkVM::new(*zkvm, program, resource.clone(), zkvm_config.clone())
+        let elf = load_elf(&guest_name, bin_path).await?;
+        let zkvm = DockerizedzkVM::new(*zkvm, Elf(elf), resource.clone(), zkvm_config.clone())
             .with_context(|| format!("Failed to initialize DockerizedzkVM, kind {zkvm}"))?;
-        instances.push(ZkVMInstance { zkvm, elf });
+        instances.push(ZkVMInstance { zkvm });
     }
     Ok(instances)
 }
 
-async fn load_program(
-    guest_name: &str,
-    bin_path: Option<&Path>,
-) -> Result<(SerializedProgram, Vec<u8>)> {
+async fn load_elf(guest_name: &str, bin_path: Option<&Path>) -> Result<Vec<u8>> {
     if let Some(path) = bin_path {
-        let bytes = fs::read(path.join(guest_name))
-            .with_context(|| format!("Failed to read program from path: {}", path.display()))?;
-        let elf = fs::read(path.join(format!("{guest_name}.elf")))
-            .with_context(|| format!("Failed to read ELF from path: {}", path.display()))?;
-        return Ok((SerializedProgram(bytes), elf));
+        return fs::read(path.join(format!("{guest_name}.elf")))
+            .with_context(|| format!("Failed to read ELF from path: {}", path.display()));
     }
 
-    let downloader = Downloader::from_tag(DEFAULT_GUEST_VERSION)
-        .await
-        .context("Failed to create guest program downloader")?;
+    let downloader = guest_downloader().await?;
     let compiled = downloader
         .download(guest_name)
         .await
         .with_context(|| format!("Failed to download guest program: {guest_name}"))?;
 
-    Ok((SerializedProgram(compiled.program), compiled.elf))
+    Ok(compiled.elf)
+}
+
+async fn guest_downloader() -> Result<Downloader> {
+    match ERE_GUESTS_DOWNLOAD_KIND {
+        "tag" => {
+            info!(
+                "Downloading guest programs from ere-guests release {}",
+                ERE_GUESTS_DOWNLOAD_VALUE
+            );
+            Downloader::from_tag(ERE_GUESTS_DOWNLOAD_VALUE)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to create guest program downloader for ere-guests release {}",
+                        ERE_GUESTS_DOWNLOAD_VALUE
+                    )
+                })
+        }
+        "commit" => {
+            let github_token = env::var("GITHUB_TOKEN")
+                .or_else(|_| env::var("GH_TOKEN"))
+                .with_context(|| {
+                    format!(
+                        "GITHUB_TOKEN or GH_TOKEN must be set to download guest artifacts for ere-guests commit {}",
+                        ERE_GUESTS_DOWNLOAD_VALUE
+                    )
+                })?;
+
+            info!(
+                "Downloading guest programs from ere-guests workflow artifacts for commit {}",
+                ERE_GUESTS_DOWNLOAD_VALUE
+            );
+            Downloader::from_commit(ERE_GUESTS_DOWNLOAD_VALUE, &github_token)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to create guest program downloader for ere-guests commit {}",
+                        ERE_GUESTS_DOWNLOAD_VALUE
+                    )
+                })
+        }
+        other => Err(anyhow!(
+            "Unsupported ere-guests download source `{}` with value `{}`",
+            other,
+            ERE_GUESTS_DOWNLOAD_VALUE
+        )),
+    }
 }
 
 /// Dumps the raw input bytes to disk
@@ -351,7 +396,7 @@ fn dump_input(
 
 /// Saves a proof's raw bytes to disk
 fn save_proof(
-    proof: &ere_zkvm_interface::Proof,
+    proof: &EncodedProof,
     name: &str,
     zkvm_name: &str,
     proofs_folder: &Path,
@@ -363,7 +408,7 @@ fn save_proof(
         .with_context(|| format!("Failed to create directory: {}", proof_dir.display()))?;
 
     let proof_path = proof_dir.join(format!("{name}.proof"));
-    fs::write(&proof_path, proof.as_bytes())
+    fs::write(&proof_path, proof)
         .with_context(|| format!("Failed to write proof to {}", proof_path.display()))?;
     info!("Saved proof to {}", proof_path.display());
 

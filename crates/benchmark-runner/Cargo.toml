@@ -2,11 +2,11 @@
 name = "benchmark-runner"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 
 [dependencies]
 witness-generator.workspace = true
 zkevm-metrics.workspace = true
-ere-zkvm-interface.workspace = true
 ere-dockerized.workspace = true
 
 rayon.workspace = true
@@ -24,7 +24,6 @@ auto_impl.workspace = true
 ere-guests-downloader.workspace = true
 tempfile.workspace = true
 
-ere-guests-block-encoding-length = { "workspace" = true, features = ["host"] }
 ere-guests-stateless-validator-ethrex = { "workspace" = true, features = [
     "host",
 ] }
